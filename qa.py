@@ -270,12 +270,41 @@ def detect_arch_flag() -> Optional[str]:
     return None
 
 
+def _ghcr_login_with_gh_token() -> bool:
+    """Log in to ghcr.io using the user's gh CLI token. Idempotent.
+
+    Required when the package is private (GHCR's default for new packages).
+    Anyone with `gh auth login` already has the credentials we need.
+    """
+    token_proc = subprocess.run(
+        ["gh", "auth", "token"], capture_output=True, text=True,
+    )
+    token = token_proc.stdout.strip()
+    if token_proc.returncode != 0 or not token:
+        return False
+    user_proc = subprocess.run(
+        ["gh", "api", "user", "--jq", ".login"],
+        capture_output=True, text=True,
+    )
+    user = user_proc.stdout.strip() or os.environ.get("USER", "github")
+    proc = subprocess.run(
+        ["docker", "login", "ghcr.io", "-u", user, "--password-stdin"],
+        input=token, text=True, capture_output=True,
+    )
+    if proc.returncode != 0:
+        warn(f"docker login ghcr.io failed: {proc.stderr.strip() or proc.stdout.strip()}")
+        return False
+    info(f"Logged into ghcr.io as {user}")
+    return True
+
+
 def ensure_runner_image() -> str:
     """Return the Docker image act should use as the ubuntu-latest runner.
 
     Resolution order:
       1. Already cached locally as RUNNER_IMAGE_LOCAL → use it.
-      2. Pull RUNNER_IMAGE_REGISTRY from GHCR, retag as RUNNER_IMAGE_LOCAL.
+      2. Pull RUNNER_IMAGE_REGISTRY from GHCR. If the pull 401s (private
+         package), log in with `gh auth token` and retry once.
       3. Dev fallback: build from a sibling Dockerfile (only present when
          running from a qa-cli checkout, not when bootstrapped via `uv run`).
     """
@@ -287,9 +316,18 @@ def ensure_runner_image() -> str:
         info(f"Using cached runner image {RUNNER_IMAGE_LOCAL}")
         return RUNNER_IMAGE_LOCAL
 
+    def _try_pull() -> bool:
+        return subprocess.run(["docker", "pull", RUNNER_IMAGE_REGISTRY]).returncode == 0
+
     info(f"Pulling runner image from {RUNNER_IMAGE_REGISTRY}…")
-    pull = subprocess.run(["docker", "pull", RUNNER_IMAGE_REGISTRY])
-    if pull.returncode == 0:
+    if not _try_pull() and _ghcr_login_with_gh_token():
+        info("Retrying pull after ghcr.io login…")
+        _try_pull()
+    inspect2 = subprocess.run(
+        ["docker", "image", "inspect", RUNNER_IMAGE_REGISTRY],
+        capture_output=True,
+    )
+    if inspect2.returncode == 0:
         subprocess.run(
             ["docker", "tag", RUNNER_IMAGE_REGISTRY, RUNNER_IMAGE_LOCAL],
             check=True,
@@ -310,9 +348,9 @@ def ensure_runner_image() -> str:
     fatal(
         "Could not obtain runner image. Tried:\n"
         f"  • local cache: docker image inspect {RUNNER_IMAGE_LOCAL}\n"
-        f"  • registry:    docker pull {RUNNER_IMAGE_REGISTRY}\n"
+        f"  • registry:    docker pull {RUNNER_IMAGE_REGISTRY} (after gh-based login attempt)\n"
         f"  • local build: {dockerfile} (not found — uv-run scripts don't fetch siblings)\n"
-        "Check Docker is running and that you can reach ghcr.io."
+        "Check Docker is running, `gh auth status` works, and you can reach ghcr.io."
     )
     return ""  # unreachable; appeases type checker
 
