@@ -29,6 +29,21 @@ RUN set -eux; \
     test -x /usr/bin/chromium; \
     echo "baked $CHROME_BIN → /usr/bin/chromium"
 
+# Bake in resend-listener — the CLI personas use to receive verification emails
+# during signup flows. Public release, no auth needed. TARGETARCH is set
+# automatically by buildx for the multi-arch build (amd64 / arm64).
+ARG RESEND_LISTENER_VERSION=0.3.0
+ARG TARGETARCH
+RUN set -eux; \
+    url="https://github.com/pagerguild/resend-listener/releases/download/v${RESEND_LISTENER_VERSION}/resend-listener_${RESEND_LISTENER_VERSION}_linux_${TARGETARCH}.tar.gz"; \
+    curl -fsSL "$url" | tar -xzC /usr/local/bin resend-listener; \
+    chmod +x /usr/local/bin/resend-listener; \
+    test -x /usr/local/bin/resend-listener; \
+    printf '%s\n' '#!/bin/sh' 'exec /usr/local/bin/resend-listener -wait "$@"' \
+        > /usr/local/bin/check-mail; \
+    chmod +x /usr/local/bin/check-mail; \
+    echo "baked resend-listener ${RESEND_LISTENER_VERSION} (${TARGETARCH}) + check-mail wrapper"
+
 # Reset to the entrypoint catthehacker expects so act's container lifecycle
 # (tail -f /dev/null then docker exec) keeps working.
 ENTRYPOINT []
