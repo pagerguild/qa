@@ -1,0 +1,84 @@
+# qa-cli
+
+Local runner for `pagerguild/qa-team`'s persona-driven QA agents.
+Invokes the same `act`-driven matrix workflow that CI uses against
+any URL, streaming each agent's progress (stdout, REPORT.md,
+screenshots) into the team's Supabase reader at
+https://qa.guys.dev.guilde.ai.
+
+The script is hosted at `https://raw.githubusercontent.com/pagerguild/qa/main/qa.py`
+and self-bootstraps via `uv run`. No clone needed.
+
+## How it splits up
+
+- **`pagerguild/qa-team`** — owns the orchestrator (`scripts/run_qa.py`),
+  the reusable workflow (`.github/workflows/qa-matrix.yml`), and any
+  cross-cutting personas (e.g. `dashboard-snapshot` exercising the
+  reader app itself).
+- **Consumer repos** — own their own `.qa/<persona>/` definitions
+  (one folder per persona: `persona.toml` + `identity.md` +
+  `prompt.md` + any fixtures). `qa-cli` reads `.qa/` from the
+  **target repo**.
+- **`qa-cli`** (this tool) — pulls qa-team's workflow + scripts from
+  `~/.cache/pagerguild-qa/qa-team` (refreshed from `main` each run),
+  copies the target repo's `.qa/` next to them in a temp workspace,
+  and invokes `act` on the qa-matrix workflow.
+
+`--target <URL>` is what the agents navigate against in the browser;
+`--here` / `--path DIR` / `--repo OWNER/NAME [--branch B]` is just
+where the personas + repo metadata come from. They're orthogonal.
+
+## Prereqs
+
+- `uv`, `gh` (authed: `gh auth login`), `doppler` (logged in:
+  `doppler login`), `act`, and Docker Desktop running.
+- The shell where you run `qa-cli` must be scoped to the **qa-team
+  Doppler config**. `qa.py` mints a 1h service token from whatever
+  Doppler scope it sees in the current directory:
+
+      cd ~/some-dir
+      doppler setup     # interactive: project=qa-team, config=prd
+      # or:
+      doppler configure set project=qa-team config=prd --scope $PWD
+
+  This is independent of the consumer repo's own Doppler scope.
+
+## Run plainterms's `insurance-agent` against production
+
+The persona lives in `pagerguild/plainterms-dev` on branch
+`fix/issue-1562` (PR #1563) at `.qa/insurance-agent/`. Until that
+PR merges, point `qa-cli` at the branch directly — it will clone
+fresh each run:
+
+    uv run https://raw.githubusercontent.com/pagerguild/qa/main/qa.py \
+      --target https://app.plainterms.io \
+      --repo pagerguild/plainterms-dev \
+      --branch fix/issue-1562
+
+Pick a different target as needed:
+
+- Production: `https://app.plainterms.io`
+- PR preview: `https://pt-preview-<N>.fly.dev`
+- Local dev: `http://localhost:5173` (auto-rewritten to
+  `host.docker.internal` so the in-container agent can reach it)
+
+After PR #1563 merges, drop `--branch`:
+
+    uv run https://raw.githubusercontent.com/pagerguild/qa/main/qa.py \
+      --target https://app.plainterms.io \
+      --repo pagerguild/plainterms-dev
+
+If you have a local checkout of `plainterms-dev` already on the right
+branch, use it instead of re-cloning:
+
+    cd ~/src/plainterms-dev   # checked out on fix/issue-1562
+    uv run https://raw.githubusercontent.com/pagerguild/qa/main/qa.py \
+      --target https://app.plainterms.io \
+      --here
+
+## Output
+
+`qa-cli` prints a `run_id=<uuid>` line near the top. Open
+`https://qa.guys.dev.guilde.ai/runs/<run_id>` to watch the run live —
+each persona streams stdout, an evolving `REPORT.md`, and screenshots
+into Supabase as it runs, and the page reflects them in near-real-time.
